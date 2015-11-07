@@ -1,0 +1,84 @@
+# ******************************************************************************
+# Documentation from:
+# https://cloud.google.com/container-engine/docs/tutorials/hello-node
+# ******************************************************************************
+GCLOUD_PROJECT_ID="ADD-PROJECT-ID"
+GCLOUD_CLUSTER_NAME="hello-world"
+GCLOUD_CLUSTER_SIZE=3
+GCLOUD_SERVICE_NAME="hello-node"
+
+GCLOUD_COMMAND = "gcloud --project #{GCLOUD_PROJECT_ID}"
+
+# ******************************************************************************
+# Tasks:
+# ******************************************************************************
+task :default => [:package]
+
+task :settings do
+  sh "gcloud config set project #{GCLOUD_PROJECT_ID}"
+  sh "gcloud config set compute/zone europe-west1-b"
+end
+
+task :clean do
+  sh "rm -rf hello"
+end
+
+task :build => [:clean] do
+  sh "cd helloworld && GOOS=linux GOARCH=amd64 go build ."
+  sh "mv helloworld/helloworld hello"
+  sh "chmod +x hello"
+end
+
+task :package => [:clean,:build] do
+  sh "tar cv --files-from /dev/null | docker import - goscratch"
+  sh "docker build -t gcr.io/#{GCLOUD_PROJECT_ID}/hello:#{Time.now.to_i} ."
+end
+
+task :create_cluster => [:settings] do
+  # Create a cluster:
+  sh "#{GCLOUD_COMMAND} container clusters create #{GCLOUD_CLUSTER_NAME} --num-nodes #{GCLOUD_CLUSTER_SIZE} --machine-type f1-micro"
+  # List instances in cluster:
+  sh "#{GCLOUD_COMMAND} compute instances list"
+  # Set this cluster as default
+  sh "gcloud config set container/cluster #{GCLOUD_CLUSTER_NAME}"
+  # Fetch and set kubectl settings
+  sh "gcloud container clusters get-credentials #{GCLOUD_CLUSTER_NAME}"
+  # View settings
+  sh "gcloud config list"
+  sh "kubectl config view"
+end
+
+task :create_service do
+  latest_image_id = `docker images | grep "gcr.io/#{GCLOUD_PROJECT_ID}/hello " | awk {'print $2'} | sort | tail -1`.gsub("\n","")
+
+  # Push docker image into google cloud registry:
+  sh "#{GCLOUD_COMMAND} docker push gcr.io/#{GCLOUD_PROJECT_ID}/hello:#{latest_image_id}"
+
+  # Create a pod:
+  sh "kubectl run #{GCLOUD_SERVICE_NAME} --image=gcr.io/#{GCLOUD_PROJECT_ID}/hello:#{latest_image_id} --port=8080"
+  sh "kubectl get pods"
+
+  # Allow external traffic by creating an external loadbalancer:
+  sh "kubectl expose rc #{GCLOUD_SERVICE_NAME} --create-external-load-balancer=true"
+
+  # List services currently running (this will list the IP address accessable from outside):
+  # TODO: Need to refresh again, because external ip is not showing up imediately.
+  sleep 10
+  sh "kubectl get services #{GCLOUD_SERVICE_NAME}"
+
+  # Scaling pods:
+  # kubectl scale rc #{GCLOUD_SERVICE_NAME} --replicas=100
+end
+
+task :delete_service do
+  # Delete the currently running service
+  sh "kubectl delete services #{GCLOUD_SERVICE_NAME}"
+
+  # stop pods:
+  sh "kubectl stop rc #{GCLOUD_SERVICE_NAME}"
+end
+
+task :delete_cluster do
+  # delete the cluster
+  sh "#{GCLOUD_COMMAND} -q container clusters delete #{GCLOUD_CLUSTER_NAME}"
+end
